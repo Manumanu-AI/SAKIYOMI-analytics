@@ -1,7 +1,11 @@
+# analysis_page.py
+
 import streamlit as st
 from datetime import datetime, timedelta
 import pandas as pd
 from config.firebase import db
+from application.billing_service import BillingService
+from utils.analysis import filter_users_by_plan  # 絞り込み関数のインポート
 
 # 日付範囲をdatetime型に変換
 def convert_str_to_datetime(date_str):
@@ -44,11 +48,12 @@ def fetch_all_performance(user_id, display_name, start_date, end_date):
 
     return data
 
-# 全てのユーザーのパフォーマンスデータを取得し、日付ごとのデータをまとめる
+# 全てのユーザーのパフォーマンスデータとbillingを取得し、日付ごとのデータをまとめる
 def get_all_users_run_data(start_date, end_date):
     users_ref = db.collection('users')
     users_docs = users_ref.stream()
 
+    billing_service = BillingService()
     all_data = []
     for user_doc in users_docs:
         user_id = user_doc.id
@@ -56,6 +61,25 @@ def get_all_users_run_data(start_date, end_date):
 
         # すべてのパフォーマンスデータを取得
         user_data = fetch_all_performance(user_id, display_name, start_date, end_date)
+
+        # billing情報を取得
+        billing_response = billing_service.list_billing(user_id)
+        if billing_response['status'] == 'success':
+            billing_list = billing_response['billing_list']
+            # 最新のbillingを取得（例としてpayment_dateでソート）
+            if billing_list:
+                latest_billing = sorted(
+                    billing_list,
+                    key=lambda x: x.get('payment_date', datetime.min),
+                    reverse=True
+                )[0]
+                plan = latest_billing.get('plan', 'None')
+            else:
+                plan = 'None'
+        else:
+            plan = 'None'
+
+        user_data['Plan'] = plan  # 'plan' を 'Plan' カラムとして追加
         all_data.append(user_data)
 
     return all_data
@@ -70,12 +94,13 @@ def prepare_dataframe_for_display(run_data, date_range):
             row = {
                 'UID': user_data['UID'],
                 'Display Name': user_data['Display Name'],
-                'Run Type': run_type
+                'Run Type': run_type,
+                'Plan': user_data.get('Plan', 'None')  # 追加
             }
 
             # 各日付のデータを取得して、日付ごとのデータをカラムに追加
             for date_str in date_range:
-                row[date_str] = user_data[run_type][date_str]
+                row[date_str] = user_data[run_type].get(date_str, 0)
 
             rows.append(row)
 
@@ -84,12 +109,12 @@ def prepare_dataframe_for_display(run_data, date_range):
 # Streamlit UI
 st.set_page_config(page_title="Run Activity Dashboard", layout="wide")
 st.title("Run Activity Dashboard")
-st.markdown("### UID, Display Name, Run Type, 日付ごとのラン数を表示")
+st.markdown("### UID, Display Name, Run Type, Plan, 日付ごとのラン数を表示")
 
-# サイドバーで日付選択とSubmitボタン
+# サイドバーで日付選択
 with st.sidebar:
     st.title("フィルター")
-    start_date = st.date_input("開始日", value=datetime.now().date() - timedelta(days=1))
+    start_date = st.date_input("開始日", value=datetime.now().date() - timedelta(days=7))
     end_date = st.date_input("終了日", value=datetime.now().date())
 
     # 日付範囲をリスト化
@@ -98,24 +123,41 @@ with st.sidebar:
     # Submitボタン
     submit_button = st.button("データを取得")
 
-# Submitボタンが押されたときに実行
+# データの取得を一度だけ行い、セッションステートに保存
 if submit_button:
-    run_data = get_all_users_run_data(start_date, end_date)
+    with st.spinner('データを取得中...'):
+        run_data = get_all_users_run_data(start_date, end_date)
 
-    if not run_data:
-        st.warning("指定された日付範囲内にデータが見つかりませんでした。")
+        if not run_data:
+            st.warning("指定された日付範囲内にデータが見つかりませんでした。")
+            st.session_state['run_data_df'] = pd.DataFrame()  # 空のDataFrameを保存
+        else:
+            # DataFrameを準備
+            run_data_df = prepare_dataframe_for_display(run_data, date_range)
+            st.session_state['run_data_df'] = run_data_df
+            st.success("データの取得が完了しました。")
+
+# データが取得されている場合のみフィルタリングオプションを表示
+if 'run_data_df' in st.session_state and not st.session_state['run_data_df'].empty:
+    st.subheader("絞り込みオプション")
+    # 絞り込み機能をページ内に配置
+    plan_options = ['feed', 'reel', 'both', 'internal', 'None']
+    selected_plans = st.multiselect("課金プランで絞り込む", options=plan_options, default=plan_options)
+
+    # フィルタリングを適用
+    filtered_df = filter_users_by_plan(st.session_state['run_data_df'], selected_plans)
+
+    if filtered_df.empty:
+        st.warning("指定された課金プランに該当するデータがありません。")
     else:
-        # DataFrameを準備
-        run_data_df = prepare_dataframe_for_display(run_data, date_range)
-
         # DataFrameを表示
-        st.dataframe(run_data_df)
+        st.dataframe(filtered_df)
 
         # CSVダウンロード機能
         def convert_df(df):
-            return df.to_csv().encode('utf-8')
+            return df.to_csv(index=False).encode('utf-8')
 
-        csv = convert_df(run_data_df)
+        csv = convert_df(filtered_df)
         st.download_button(
             label="データをCSVとしてダウンロード",
             data=csv,
