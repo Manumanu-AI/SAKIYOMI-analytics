@@ -12,8 +12,8 @@ def convert_str_to_datetime(date_str):
     # ドキュメントIDが 'YYYY-MM-DD' 形式の場合
     return datetime.strptime(date_str, '%Y-%m-%d')
 
-# Firestoreから全てのパフォーマンスデータを取得し、該当しないデータに0を設定する
-def fetch_all_performance(user_id, display_name, start_date, end_date):
+# Firestoreから全てのパフォーマンスデータとuser_indexデータを取得し、該当しないデータに0を設定する
+def fetch_all_performance_and_user_index(user_id, display_name, start_date, end_date):
     # 日付範囲内でのデフォルト値を設定
     data = {
         'UID': user_id,
@@ -47,9 +47,17 @@ def fetch_all_performance(user_id, display_name, start_date, end_date):
             # 日付に変換できないドキュメントIDはスキップ
             pass
 
+    # user_indexデータを取得
+    user_index_ref = db.collection('users').document(user_id).collection('user_index')
+    user_index_docs = user_index_ref.stream()
+
+    for doc in user_index_docs:
+        user_index_data = doc.to_dict()
+        data[f"{doc.id.capitalize()} Langsmith Project Name"] = user_index_data.get('langsmith_project_name', 'None')
+
     return data
 
-# 全てのユーザーのパフォーマンスデータとbillingを取得し、日付ごとのデータをまとめる
+# 全てのユーザーのパフォーマンスデータ、billing、user_indexを取得し、日付ごとのデータをまとめる
 def get_all_users_run_data(start_date, end_date):
     users_ref = db.collection('users')
     users_docs = users_ref.stream()
@@ -60,8 +68,8 @@ def get_all_users_run_data(start_date, end_date):
         user_id = user_doc.id
         display_name = user_doc.to_dict().get('display_name', 'Unknown User')
 
-        # すべてのパフォーマンスデータを取得
-        user_data = fetch_all_performance(user_id, display_name, start_date, end_date)
+        # すべてのパフォーマンスデータとuser_indexデータを取得
+        user_data = fetch_all_performance_and_user_index(user_id, display_name, start_date, end_date)
 
         # billing情報を取得
         billing_response = billing_service.list_billing(user_id)
@@ -102,7 +110,9 @@ def prepare_dataframe_for_display(run_data, date_range):
                 'Display Name': user_data['Display Name'],
                 'Run Type': run_type,
                 'Plan': user_data.get('Plan', 'None'),
-                'Billing Status': user_data.get('Billing Status', 'None')
+                'Billing Status': user_data.get('Billing Status', 'None'),
+                'Feed Langsmith Project Name': user_data.get('Feed Langsmith Project Name', 'None'),
+                'Reel Langsmith Project Name': user_data.get('Reel Langsmith Project Name', 'None')
             }
 
             # 各日付のデータを取得して、日付ごとのデータをカラムに追加
